@@ -23,6 +23,11 @@ sandbox/
 # Cached/downloaded data
 llms-full.txt
 
+# GCP icon assets and architecture diagrams
+gcp_icons/
+batbot_architecture.md
+batbot_schema.txt
+
 # Python
 __pycache__/
 *.pyc
