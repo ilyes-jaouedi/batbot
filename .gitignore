@@ -1,0 +1,51 @@
+# Secrets & credentials
+.env
+client_secret_*.json
+oauth_token.json
+token.json
+*.pem
+*.key
+
+# Session & runtime data
+*.pkl
+*.pickle
+local_sessions*.pkl
+
+# Vector database (generated at runtime)
+chroma_db/
+
+# Personal knowledge base (local documents only)
+knowledge_base/
+
+# Working directory (runtime outputs)
+sandbox/
+
+# Cached/downloaded data
+llms-full.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# ADK cache
+.adk/
+agent/.adk/
+
+# Backup files created before sanitizing
+*.bak
+
+# System
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
