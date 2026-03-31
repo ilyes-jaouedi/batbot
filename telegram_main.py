@@ -21,9 +21,7 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", 0))
-BOT_PASSWORD = os.getenv("BOT_PASSWORD")
-if not BOT_PASSWORD:
-    raise ValueError("BOT_PASSWORD is not set in .env")
+BOT_PASSWORD = os.getenv("BOT_PASSWORD", "BatbotSecure2026")
 
 # Track which users have successfully entered the password in this server session
 authenticated_users = set()
@@ -90,7 +88,7 @@ async def handle_telegram_message(update: Update, context: ContextTypes.DEFAULT_
             
         if user_input.strip() == BOT_PASSWORD:
             authenticated_users.add(user_id)
-            await update.message.reply_text("✅ Access Granted. Welcome back. Batbot is ready. (Type /lock to secure the session later).")
+            await update.message.reply_text("✅ Access Granted. Welcome back, Ilyes. Batbot is ready. (Type /lock to secure the session later).")
             logging.info(f"User {user_id} successfully authenticated with password.")
         else:
             await update.message.reply_text("🔒 Batbot is locked. Please enter the password to proceed.")
