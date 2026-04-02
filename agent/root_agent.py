@@ -16,12 +16,6 @@ from .tools import (
 from .searcher import create_search_agent
 from .config import MODEL_NAME, RETRY_OPTIONS, ROOT_AGENT_INSTRUCTIONS
 
-# --- Auth mode detection ---
-# Set GOOGLE_GENAI_USE_VERTEXAI=TRUE in .env for Vertex AI (GCP project required).
-# Leave unset or set GOOGLE_API_KEY for direct Gemini API key access.
-_use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").upper() == "TRUE"
-_api_key    = os.getenv("GOOGLE_API_KEY")
-
 def sanitize_output(func):
     """Decorator to sanitize string outputs of tool functions."""
     @functools.wraps(func)
@@ -34,10 +28,12 @@ def sanitize_output(func):
 
 def _build_gemini(model_name: str) -> Gemini:
     """Build a Gemini model instance using Vertex AI or API key, based on .env."""
-    if _use_vertex:
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").upper() == "TRUE"
+    api_key    = os.getenv("GOOGLE_API_KEY")
+    if use_vertex:
         return Gemini(model=model_name, retry_options=RETRY_OPTIONS)
-    if _api_key:
-        return Gemini(model=model_name, api_key=_api_key, retry_options=RETRY_OPTIONS)
+    if api_key:
+        return Gemini(model=model_name, api_key=api_key, retry_options=RETRY_OPTIONS)
     raise EnvironmentError(
         "No auth configured. Set GOOGLE_GENAI_USE_VERTEXAI=TRUE (+ GOOGLE_CLOUD_PROJECT) "
         "or GOOGLE_API_KEY in your .env file."
