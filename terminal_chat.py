@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -70,7 +71,7 @@ class TerminalUI:
                 if self.status:
                     self.status.update(status="[bold yellow]Batbot is thinking...[/bold yellow]")
 
-async def terminal_chat():
+async def terminal_chat(debug: bool = False):
     ui = TerminalUI(console)
     
     # 1. Initialize agent and session service
@@ -130,11 +131,12 @@ async def terminal_chat():
                            console=console, refresh_per_second=4, vertical_overflow="visible") as live:
                     ui.live = live
                     response = await run_interaction(
-                        agent, 
-                        session_service, 
-                        user_id, 
-                        user_input, 
-                        on_event=ui.on_agent_event
+                        agent,
+                        session_service,
+                        user_id,
+                        user_input,
+                        on_event=ui.on_agent_event,
+                        debug=debug
                     )
                     # Final update to ensure everything is rendered
                     live.update(Panel(
@@ -151,10 +153,15 @@ async def terminal_chat():
         except EOFError:
             break # Ctrl+D to exit
         except Exception as e:
+            import traceback
             console.print(f"\n[error]❌ Error: {e}[/error]")
+            console.print(f"[error]{traceback.format_exc()}[/error]")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="Enable debug output")
+    args = parser.parse_args()
     try:
-        asyncio.run(terminal_chat())
+        asyncio.run(terminal_chat(debug=args.debug))
     except (KeyboardInterrupt, EOFError):
         console.print("\n[error]Exiting...[/error]")
