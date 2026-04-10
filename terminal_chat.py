@@ -1,20 +1,25 @@
 import argparse
 import asyncio
 import os
+import time
+from typing import Optional
 from dotenv import load_dotenv
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.markdown import Markdown
-from rich.status import Status
 from rich.live import Live
 from rich.text import Text
-from rich.layout import Layout
+from rich.rule import Rule
 from rich.theme import Theme
+from rich.spinner import Spinner
+from rich.padding import Padding
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import HTML
 
 from agent.root_agent import create_root_agent
 from runner.app_runner import run_interaction
@@ -23,139 +28,224 @@ from runner.local_session_service import LocalPickleSessionService
 # Load environment variables
 load_dotenv()
 
-# Custom theme for better visual distinction
-custom_theme = Theme({
-    "agent.name": "bold cyan",
-    "agent.text": "white",
-    "agent.tool_call": "bold blue",
-    "agent.tool_name": "cyan",
-    "agent.tool_done": "bold green",
-    "user.name": "bold green",
-    "user.text": "white",
-    "error": "bold red",
-    "info": "italic magenta"
+THEME = Theme({
+    "agent.name":      "bold cyan",
+    "agent.tool_call": "yellow",
+    "agent.tool_name": "bold cyan",
+    "agent.tool_done": "green",
+    "user.name":       "bold green",
+    "error":           "bold red",
+    "info":            "dim white",
+    "elapsed":         "dim cyan italic",
 })
 
-console = Console(theme=custom_theme)
+console = Console(theme=THEME, highlight=False)
+
+PROMPT_STYLE = Style.from_dict({
+    "prompt": "ansigreen bold",
+})
+
 
 class TerminalUI:
-    def __init__(self, console):
+    def __init__(self, console: Console):
         self.console = console
-        self.status = None
         self.accumulated_text = ""
-        self.live = None
+        self.live: Optional[Live] = None
+        self.tool_log: list[tuple[str, str]] = []   # (name, args_preview)
+        self.current_tool: Optional[str] = None
+        self._pending_args: dict[str, str] = {}     # function_call name -> preview
+        self.responding = False
+
+    def reset(self):
+        self.accumulated_text = ""
+        self.tool_log = []
+        self.current_tool = None
+        self._pending_args = {}
+        self.responding = False
+
+    def _renderable(self):
+        items = []
+
+        # Completed tool calls
+        for name, preview in self.tool_log:
+            line = Text()
+            line.append("  ✓ ", style="agent.tool_done bold")
+            line.append(name, style="agent.tool_name")
+            if preview:
+                line.append(f"  {preview}", style="dim")
+            items.append(line)
+
+        # Active spinner: tool execution or plain thinking
+        if self.current_tool:
+            items.append(Spinner("dots", text=Text.from_markup(
+                f"  [agent.tool_call]⚙  {self.current_tool}[/agent.tool_call]"
+            )))
+        elif not self.responding:
+            items.append(Spinner("dots2", text=Text.from_markup(
+                "  [bold yellow]Batbot is thinking...[/bold yellow]"
+            )))
+
+        # Streaming response panel
+        if self.accumulated_text:
+            items.append(Panel(
+                Markdown(self.accumulated_text),
+                title="[agent.name] Batbot [/agent.name]",
+                border_style="cyan",
+                padding=(0, 1),
+            ))
+
+        return Group(*items) if items else Text("")
 
     async def on_agent_event(self, event):
         if not event.content or not event.content.parts:
             return
 
+        changed = False
         for part in event.content.parts:
             if part.text:
-                # Accumulate text for the final markdown render
                 self.accumulated_text += part.text
-                if self.live:
-                    self.live.update(Panel(
-                        Markdown(self.accumulated_text),
-                        title="[agent.name]Batbot[/agent.name]",
-                        border_style="cyan",
-                        expand=False
-                    ))
+                self.responding = True
+                self.current_tool = None
+                changed = True
             elif part.function_call:
-                self.console.print(f"[agent.tool_call]🛠️  Calling Tool:[/agent.tool_call] [agent.tool_name]{part.function_call.name}[/agent.tool_name]")
-                if self.status:
-                    self.status.update(status=f"[agent.tool_call]Executing {part.function_call.name}...[/agent.tool_call]")
+                args = part.function_call.args or {}
+                preview = ""
+                if args:
+                    key = next(iter(args))
+                    val = str(args[key])
+                    preview = f'{key}="{val[:60]}{"…" if len(val) > 60 else ""}"'
+                self._pending_args[part.function_call.name] = preview
+                self.current_tool = f"{part.function_call.name}({preview})"
+                changed = True
             elif part.function_response:
-                # We can't easily see the response content here without knowing its structure,
-                # but we can acknowledge it's done.
-                self.console.print(f"[agent.tool_done]✅ Tool [agent.tool_name]{part.function_response.name}[/agent.tool_name] finished.[/agent.tool_done]")
-                if self.status:
-                    self.status.update(status="[bold yellow]Batbot is thinking...[/bold yellow]")
+                name = part.function_response.name
+                preview = self._pending_args.pop(name, "")
+                self.tool_log.append((name, preview))
+                self.current_tool = None
+                changed = True
+
+        if changed and self.live:
+            self.live.update(self._renderable())
+
 
 async def terminal_chat(debug: bool = False):
     ui = TerminalUI(console)
-    
-    # 1. Initialize agent and session service
-    with Status("[bold green]Initializing Batbot...[/bold green]", console=console) as status:
+
+    # Header
+    console.print()
+    console.print(Rule("[bold cyan] ✦ Batbot [/bold cyan]", style="cyan"))
+    console.print()
+
+    # Init spinner (single Live, no nested Status)
+    with Live(
+        Spinner("dots2", text="  [bold green]Initializing...[/bold green]"),
+        console=console,
+        refresh_per_second=12,
+    ) as live:
         agent = create_root_agent()
         session_service = LocalPickleSessionService(file_path="local_sessions.pkl")
-    
-    # 2. Setup user context
+        live.update(Text.from_markup("  [bold green]✓  Ready[/bold green]"))
+
     user_id = os.getenv("ALLOWED_USER_ID")
     if not user_id:
-        console.print("[error]❌ Error: ALLOWED_USER_ID not found in .env.[/error]")
+        console.print("[error]❌  ALLOWED_USER_ID not set in .env[/error]")
         return
 
-    # 3. Setup prompt-toolkit session for history and better input
-    # Ensure history directory exists
     history_file = os.path.join(os.path.expanduser("~"), ".batbot_history")
-    session = PromptSession(history=FileHistory(history_file))
+    prompt_session = PromptSession(
+        history=FileHistory(history_file),
+        style=PROMPT_STYLE,
+    )
 
-    console.print(Panel(
-        Text(f"Context: User {user_id}\nType 'exit' or 'quit' to stop.\nHistory is saved to {history_file}", justify="center"),
-        title="[agent.name]Batbot Terminal Chat[/agent.name]",
-        border_style="magenta"
-    ))
+    console.print(Padding(Text.from_markup(
+        f"[info]session: {user_id}  ·  /clear to reset  ·  exit to quit[/info]"
+    ), (0, 2)))
+    console.print()
 
     while True:
         try:
-            # 4. Get input with history support
-            user_input = await session.prompt_async(
-                [("class:user.name", "You: ")],
-                auto_suggest=AutoSuggestFromHistory()
+            user_input = await prompt_session.prompt_async(
+                HTML("<ansigreen><b>You ❯</b></ansigreen> "),
+                auto_suggest=AutoSuggestFromHistory(),
             )
             user_input = user_input.strip()
-            
-            if user_input.lower() == "/clear":
-                session_id = f"session_{user_id}"
-                app_name = "telegram_bot_app"
-                try:
-                    # Try to delete if it exists
-                    await session_service.delete_session(app_name=app_name, user_id=user_id, session_id=session_id)
-                except Exception:
-                    pass
-                await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
-                console.print("[info]🧹 Session history cleared.[/info]")
-                continue
 
-            if user_input.lower() in ["exit", "quit"]:
-                break
             if not user_input:
                 continue
 
-            # 5. Run interaction
-            ui.accumulated_text = ""
-            with Status("[bold yellow]Batbot is thinking...[/bold yellow]", console=console) as status:
-                ui.status = status
-                # Create a Live display for streaming Markdown
-                with Live(Panel(Text("..."), title="[agent.name]Batbot[/agent.name]", border_style="cyan"), 
-                           console=console, refresh_per_second=4, vertical_overflow="visible") as live:
-                    ui.live = live
-                    response = await run_interaction(
-                        agent,
-                        session_service,
-                        user_id,
-                        user_input,
-                        on_event=ui.on_agent_event,
-                        debug=debug
+            if user_input.lower() in ["exit", "quit"]:
+                console.print()
+                console.print(Rule(style="dim"))
+                console.print(Padding(Text.from_markup("[info]Goodbye.[/info]"), (0, 2)))
+                break
+
+            if user_input.lower() == "/clear":
+                app_name = "telegram_bot_app"
+                session_id = f"session_{user_id}"
+                try:
+                    await session_service.delete_session(
+                        app_name=app_name, user_id=user_id, session_id=session_id
                     )
-                    # Final update to ensure everything is rendered
-                    live.update(Panel(
-                        Markdown(response),
-                        title="[agent.name]Batbot[/agent.name]",
-                        border_style="cyan"
-                    ))
-            
+                except Exception:
+                    pass
+                await session_service.create_session(
+                    app_name=app_name, user_id=user_id, session_id=session_id
+                )
+                console.print(Padding(Text.from_markup("[info]✓  Session cleared[/info]"), (0, 2)))
+                continue
+
+            # --- User turn display ---
+            console.print()
+            console.print(Rule("[user.name] You [/user.name]", style="green", align="left"))
+            console.print(Padding(Text(user_input, style="white"), (0, 2)))
+            console.print()
+
+            # --- Agent turn ---
+            ui.reset()
+            t0 = time.monotonic()
+
+            with Live(
+                ui._renderable(),
+                console=console,
+                refresh_per_second=12,
+                vertical_overflow="visible",
+            ) as live:
+                ui.live = live
+                response = await run_interaction(
+                    agent,
+                    session_service,
+                    user_id,
+                    user_input,
+                    on_event=ui.on_agent_event,
+                    debug=debug,
+                )
+                # Final static render
+                live.update(Panel(
+                    Markdown(response or "_(no response)_"),
+                    title="[agent.name] Batbot [/agent.name]",
+                    border_style="cyan",
+                    padding=(0, 1),
+                ))
+
+            elapsed = time.monotonic() - t0
+            console.print(Padding(
+                Text.from_markup(f"[elapsed]⏱  {elapsed:.1f}s[/elapsed]"),
+                (0, 2)
+            ))
+            console.print()
+
             ui.live = None
-            ui.status = None
 
         except KeyboardInterrupt:
-            continue # Allow Ctrl+C to clear the line
+            continue
         except EOFError:
-            break # Ctrl+D to exit
+            break
         except Exception as e:
-            import traceback
-            console.print(f"\n[error]❌ Error: {e}[/error]")
-            console.print(f"[error]{traceback.format_exc()}[/error]")
+            console.print(f"\n[error]❌  {e}[/error]")
+            if debug:
+                import traceback
+                console.print(f"[error]{traceback.format_exc()}[/error]")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -164,4 +254,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(terminal_chat(debug=args.debug))
     except (KeyboardInterrupt, EOFError):
-        console.print("\n[error]Exiting...[/error]")
+        console.print("\n[info]Goodbye.[/info]")
